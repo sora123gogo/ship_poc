@@ -1,0 +1,50 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# ===== Virtual Env =====
+venv/
+.env/
+.venv/
+env/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Logs =====
+*.log
+
+# ===== Data (Do NOT upload large files) =====
+data/raw/*
+data/frames/*
+data/outputs/*
+data/viz/*
+
+# Keep folders
+!data/raw/.gitkeep
+!data/frames/.gitkeep
+!data/outputs/.gitkeep
+!data/viz/.gitkeep
+
+# ===== Models / Weights =====
+*.pt
+*.onnx
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+
+# ===== word and excel =====
+
+PoC構想書.xlsx
+memo.docx
