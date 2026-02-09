@@ -9,37 +9,37 @@ import pandas as pd
 # =========================
 # ===== 配置区 =====
 # =========================
-# detect: 只做检测（每帧独立）
-# track : 检测 + 跟踪（分配 track_id）
+# detect: for detect
+# track : track（get track_id）
 MODE = "track"   # "detect" or "track"
 VIDEO_NAME = "Busiest Day so far - 8 Ships in Port - LIVE Replay [u62fnabcShI].mp4"
 
-FPS_TARGET = 3                  # 抽帧频率：1fps（frames已有则不抽）
+FPS_TARGET = 3                  # fps（frames）for 1s
 CLEAR_FRAMES_IF_EXISTS = False  # True: 每次运行都重抽；False: frames有就复用
 
-# 白天/夜晚推理参数（建议你后面把 DAY conf 降到 0.2~0.25 试试，会少漏检）
+# day and night para
 DAY_CFG = {"imgsz": 1280, "conf": 0.25}
 NIGHT_CFG = {"imgsz": 1280, "conf": 0.03}
 
-# 夜晚判定阈值（灰度均值 < 阈值 => night）
+# 夜晚判定阈值（gray < 阈值 => night）
 NIGHT_THRESH = 60
-NIGHT_CHECK_EVERY = 10  # 每 N 帧重新判断一次昼夜（防抖）
+NIGHT_CHECK_EVERY = 10  # 一定フレーム数ごとに昼夜判定を再実行し、判定の揺らぎ（チャタリング）を抑制
 
-# 面积过滤：只保留“大目标”（更像大船）
+# 面積フィルタリング
 USE_AREA_FILTER = True
-AREA_RATIO = 0.01  # bbox面积 / 画面面积 > 1% 才保留
+AREA_RATIO = 0.01  # bbox面積 / 画面面積 > 1% hold
 
-# 输出可视化视频fps（只影响输出播放速度）
+# 出力可視化動画のFPSは再生速度のみに影響し、解析処理自体には影響しない
 OUT_FPS = 10
 
-# ===== 可视化平滑（仅影响视频，不影响数据）=====
-ENABLE_VIZ_SMOOTH = True  # True: 视频中允许短暂 HOLD；False: 完全真实（可能闪）
-KEEP_ZERO = 2             # 最多 HOLD 几帧
-prev_det_vis = None       # 只给可视化用
-zero_keep = 0
+# ===== 可視化平滑処理は表示用動画のみに適用し、解析データ自体には影響しない=====
+ENABLE_VIZ_SMOOTH = True  # True：可視化時に短時間のHOLDを許可 / False：完全に実測値を表示（ちらつきの可能性あり）
+KEEP_ZERO = 2             # 最大HOLDフレーム数
+prev_det_vis = None       # 可視化専用の直前検出結果
+zero_keep = 0             #HOLD用カウンタ
 
 # =========================
-# 路径区
+# path
 # =========================
 FRAMES_DIR = Path("data/frames")
 RAW_VIDEO = Path("data/raw") / VIDEO_NAME
@@ -56,7 +56,7 @@ OUT_META  = OUT_DIR / "frame_meta.csv"
 
 
 def enhance_night(frame):
-    """夜间轻量增强：CLAHE 提亮+提对比（PoC友好）"""
+    """夜画像強化"""
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -66,18 +66,18 @@ def enhance_night(frame):
 
 
 def gray_mean(frame):
-    """灰度均值：用于判断昼夜"""
+    """グレースケール平均値算出"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return float(np.mean(gray))
 
 
 def decide_night(mean_val, thresh=NIGHT_THRESH):
-    """mean_val 越小越暗；小于阈值认为 night"""
+    """ 昼夜判定"""
     return mean_val < thresh
 
 
 def ensure_frames():
-    """保证 frames 目录里有抽帧 jpg；没有就从视频抽（按 FPS_TARGET）"""
+    """フレームが存在しない場合に動画から抽出"""
     FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 
     if CLEAR_FRAMES_IF_EXISTS:
@@ -114,7 +114,7 @@ def ensure_frames():
 
 
 def apply_area_filter(det: sv.Detections, frame_shape, ratio=AREA_RATIO):
-    """按 bbox 面积过滤小目标（保留大船更稳）"""
+    """面積フィルタ処理"""
     if len(det) == 0:
         return det
 
@@ -139,13 +139,13 @@ def main():
     if not frame_paths:
         raise RuntimeError("No frames found in data/frames")
 
-    # 模型（COCO通用）
+    # YOLOモデル（COCO汎用）
     model = YOLO("yolov8s.pt")
 
-    # 跟踪器（仅 track 模式）
+    # トラッカー（trackモードのみ）
     tracker = sv.ByteTrack() if MODE == "track" else None
 
-    # 初始化输出视频 writer
+    # 出力動画初期化
     first = cv2.imread(frame_paths[0])
     if first is None:
         raise RuntimeError("Failed to read first frame.")
@@ -162,7 +162,7 @@ def main():
     label_annotator = sv.LabelAnnotator()
 
     meta_rows = []
-    night_flag = False  # 防抖后的昼夜状态缓存
+    night_flag = False  # 昼夜状態キャッシュ（防抖）
 
     with OUT_JSONL.open("w", encoding="utf-8") as f_json:
         for i, fp in enumerate(tqdm(frame_paths)):
@@ -170,7 +170,7 @@ def main():
             if frame is None:
                 continue
 
-            # ====== 昼夜判断（防抖）======
+            # ====== 昼夜判定（防抖処理）======
             if i % NIGHT_CHECK_EVERY == 0:
                 m = gray_mean(frame)
                 night_flag = decide_night(m)
@@ -183,7 +183,7 @@ def main():
                 "gray_mean": m if m is not None else ""
             })
 
-            # ====== 选择推理输入/参数 ======
+            # ====== 推論設定切替======
             if night_flag:
                 frame_infer = enhance_night(frame)
                 cfg = NIGHT_CFG
@@ -191,7 +191,7 @@ def main():
                 frame_infer = frame
                 cfg = DAY_CFG
 
-            # ====== YOLO 推理 ======
+            # ====== YOLO推論 ======
             res = model.predict(
                 frame_infer,
                 imgsz=cfg["imgsz"],
@@ -201,15 +201,15 @@ def main():
 
             det = sv.Detections.from_ultralytics(res)
 
-            # ====== 面积过滤（可选）======
+            # ====== 面積フィルタ======
             if USE_AREA_FILTER:
                 det = apply_area_filter(det, frame.shape, ratio=AREA_RATIO)
 
-            # ====== 跟踪（可选）======
+            # ====== トラッキング======
             if MODE == "track":
                 det = tracker.update_with_detections(det)
 
-            # ====== det_data / det_vis 分离 ======
+            # ====== データ用 / 可視化用 分離======
             # det_data：真实结果（用于 jsonl/统计）
             det_data = det
 
@@ -224,7 +224,7 @@ def main():
                 zero_keep = 0
                 prev_det_vis = det_vis
 
-            # ====== 写 jsonl（永远写 det_data）======
+            # ======  JSONL出力（常に det_data 使用）======
             rec = {"frame": os.path.basename(fp), "is_night": int(night_flag), "items": []}
 
             if MODE == "track":
@@ -248,7 +248,7 @@ def main():
 
             f_json.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-            # ====== 可视化（永远画 det_vis）======
+            # ====== 可視化描画（常に det_vis 使用）======
             if MODE == "track":
                 labels = [f"id:{int(tid)}" if tid is not None else "" for tid in det_vis.tracker_id]
             else:
@@ -257,7 +257,7 @@ def main():
             annotated = box_annotator.annotate(frame.copy(), det_vis)
             annotated = label_annotator.annotate(annotated, det_vis, labels=labels)
 
-            # 角标：DAY/NIGHT + RAW/HOLD（HOLD=仅视频平滑）
+            # 表示タグ（DAY/NIGHT + RAW/HOLD）
             tag1 = "NIGHT" if night_flag else "DAY"
             tag2 = "HOLD" if hold_flag else "RAW"
 
@@ -270,7 +270,7 @@ def main():
 
     vw.release()
 
-    # 保存 meta csv
+    # save meta csv
     pd.DataFrame(meta_rows).to_csv(OUT_META, index=False, encoding="utf-8")
 
     print(f"[done] saved jsonl: {OUT_JSONL}")
