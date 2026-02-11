@@ -7,36 +7,36 @@ import numpy as np
 import pandas as pd
 
 # =========================
-# ===== 配置区 =====
+# ===== 設定 =====
 # =========================
-# detect: for detect
+# detect: detect only
 # track : track（get track_id）
 MODE = "track"   # "detect" or "track"
 VIDEO_NAME = "Busiest Day so far - 8 Ships in Port - LIVE Replay [u62fnabcShI].mp4"
 
-FPS_TARGET = 3                  # fps（frames）for 1s
-CLEAR_FRAMES_IF_EXISTS = False  # True: 每次运行都重抽；False: frames有就复用
+FPS_TARGET = 3                  # 抽出FPS（解析用）
+CLEAR_FRAMES_IF_EXISTS = False  # True: 毎回再抽出 / False: 既存フレームがあれば再利用
 
-# day and night para
+# day / night inference config
 DAY_CFG = {"imgsz": 1280, "conf": 0.25}
 NIGHT_CFG = {"imgsz": 1280, "conf": 0.03}
 
-# 夜晚判定阈值（gray < 阈值 => night）
+# 夜間判定（gray_mean < thresh => night）
 NIGHT_THRESH = 60
-NIGHT_CHECK_EVERY = 10  # 一定フレーム数ごとに昼夜判定を再実行し、判定の揺らぎ（チャタリング）を抑制
+NIGHT_CHECK_EVERY = 10  # 一定フレーム毎に再判定し、チャタリングを抑制
 
-# 面積フィルタリング
+# 面積フィルタ
 USE_AREA_FILTER = True
-AREA_RATIO = 0.01  # bbox面積 / 画面面積 > 1% hold
+AREA_RATIO = 0.01  # bbox面積 / 画面面積 > 1% のみ保持
 
-# 出力可視化動画のFPSは再生速度のみに影響し、解析処理自体には影響しない
+# 可視化出力動画のFPS（再生速度にのみ影響）
 OUT_FPS = 10
 
-# ===== 可視化平滑処理は表示用動画のみに適用し、解析データ自体には影響しない=====
-ENABLE_VIZ_SMOOTH = True  # True：可視化時に短時間のHOLDを許可 / False：完全に実測値を表示（ちらつきの可能性あり）
+# 可視化平滑（表示用のみ。JSONLなど解析データには影響しない）
+ENABLE_VIZ_SMOOTH = True  # True: 漏検出時に短時間HOLD / False: 生の検出結果を表示
 KEEP_ZERO = 2             # 最大HOLDフレーム数
-prev_det_vis = None       # 可視化専用の直前検出結果
-zero_keep = 0             #HOLD用カウンタ
+prev_det_vis = None       # 可視化専用の直前検出結果（空検出では更新しない）
+zero_keep = 0             # HOLD用カウンタ
 
 # =========================
 # path
@@ -56,7 +56,7 @@ OUT_META  = OUT_DIR / "frame_meta.csv"
 
 
 def enhance_night(frame):
-    """夜画像強化"""
+    """夜間フレームの視認性向上（CLAHE）"""
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -66,18 +66,18 @@ def enhance_night(frame):
 
 
 def gray_mean(frame):
-    """グレースケール平均値算出"""
+    """グレースケール平均輝度"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return float(np.mean(gray))
 
 
 def decide_night(mean_val, thresh=NIGHT_THRESH):
-    """ 昼夜判定"""
+    """昼夜判定"""
     return mean_val < thresh
 
 
 def ensure_frames():
-    """フレームが存在しない場合に動画から抽出"""
+    """フレームが存在しない場合に動画から抽出（既存があれば再利用）"""
     FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 
     if CLEAR_FRAMES_IF_EXISTS:
@@ -114,7 +114,7 @@ def ensure_frames():
 
 
 def apply_area_filter(det: sv.Detections, frame_shape, ratio=AREA_RATIO):
-    """面積フィルタ処理"""
+    """面積フィルタ（小さすぎるbboxを除外）"""
     if len(det) == 0:
         return det
 
@@ -138,6 +138,15 @@ def main():
     frame_paths = sorted(glob.glob(str(FRAMES_DIR / "*.jpg")))
     if not frame_paths:
         raise RuntimeError("No frames found in data/frames")
+
+    # ====== 原動画のFPSを取得（time_sec算出用）======
+    cap_info = cv2.VideoCapture(str(RAW_VIDEO))
+    if not cap_info.isOpened():
+        raise RuntimeError(f"Cannot open video: {RAW_VIDEO}")
+    video_fps = cap_info.get(cv2.CAP_PROP_FPS)
+    cap_info.release()
+    if video_fps <= 1e-6:
+        raise ValueError("Invalid FPS detected from video.")
 
     # YOLOモデル（COCO汎用）
     model = YOLO("yolov8s.pt")
@@ -170,7 +179,7 @@ def main():
             if frame is None:
                 continue
 
-            # ====== 昼夜判定（防抖処理）======
+            # ====== 昼夜判定（防抖）======
             if i % NIGHT_CHECK_EVERY == 0:
                 m = gray_mean(frame)
                 night_flag = decide_night(m)
@@ -180,7 +189,7 @@ def main():
             meta_rows.append({
                 "frame": os.path.basename(fp),
                 "is_night": int(night_flag),
-                "gray_mean": m if m is not None else ""
+                "gray_mean": m if m is not None else None,  # 数値列を保つため None 推奨
             })
 
             # ====== 推論設定切替======
@@ -201,19 +210,18 @@ def main():
 
             det = sv.Detections.from_ultralytics(res)
 
-            # ====== 面積フィルタ======
+            # ====== 面積フィルタ ======
             if USE_AREA_FILTER:
                 det = apply_area_filter(det, frame.shape, ratio=AREA_RATIO)
 
-            # ====== トラッキング======
+            # ====== トラッキング ======
             if MODE == "track":
                 det = tracker.update_with_detections(det)
 
-            # ====== データ用 / 可視化用 分離======
-            # det_data：真实结果（用于 jsonl/统计）
-            det_data = det
+            # ====== データ用 / 可視化用 分離 ======
+            det_data = det  # JSONL/統計用（生データ）
 
-            # det_vis：只用于画框（可选平滑）
+            # det_vis：可視化のみ（HOLDは表示専用）
             hold_flag = False
             if ENABLE_VIZ_SMOOTH and len(det_data) == 0 and prev_det_vis is not None and zero_keep < KEEP_ZERO:
                 det_vis = prev_det_vis
@@ -222,13 +230,27 @@ def main():
             else:
                 det_vis = det_data
                 zero_keep = 0
-                prev_det_vis = det_vis
+                # 検出があるフレームのみ prev_det_vis を更新（空検出で上書きしない）
+                if len(det_data) > 0:
+                    prev_det_vis = det_data
 
-            # ======  JSONL出力（常に det_data 使用）======
-            rec = {"frame": os.path.basename(fp), "is_night": int(night_flag), "items": []}
+            # ====== JSONL出力（常に det_data 使用）======
+            # ファイル名から原動画フレーム番号を復元：frame_0000123.jpg -> 123
+            src_idx = int(Path(fp).stem.split("_")[-1])
+
+            # 原動画基準の時刻（秒）を付与（抽出FPSを変えても軸がブレない）
+            time_sec = src_idx / video_fps
+
+            rec = {
+                "frame": os.path.basename(fp),
+                "src_frame_idx": src_idx,
+                "time_sec": round(time_sec, 3),
+                "is_night": int(night_flag),
+                "items": []
+            }
 
             if MODE == "track":
-                # tracker_id 可能为 None（没分配到轨迹），就跳过
+                # tracker_id が None（未割当）の場合はスキップ
                 for xyxy, tid, conf in zip(det_data.xyxy, det_data.tracker_id, det_data.confidence):
                     if tid is None:
                         continue
@@ -270,7 +292,7 @@ def main():
 
     vw.release()
 
-    # save meta csv
+    # meta csv 出力（昼夜判定ログ）
     pd.DataFrame(meta_rows).to_csv(OUT_META, index=False, encoding="utf-8")
 
     print(f"[done] saved jsonl: {OUT_JSONL}")
