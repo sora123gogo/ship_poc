@@ -35,6 +35,13 @@ conda activate ship_poc
 ```bash
 pip install -r requirements.txt
 ```
+もし上記でエラーが発生する場合は、以下をお試しください：
+
+```bash
+pip install ultralytics opencv-python numpy pandas tqdm
+pip install supervision
+```
+
 
 ### 映像データの配置
 解析対象の港湾映像を以下に配置してください：
